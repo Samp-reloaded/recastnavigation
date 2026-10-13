@@ -61,13 +61,17 @@ using namespace recastnav;
 class CrowdFailResource final : public std::pmr::memory_resource {
 public:
     void SetFailing(bool failing) noexcept { m_failing = failing; }
+    void StopOnNextAllocation(std::stop_source source) noexcept { m_stopOnAllocation = std::move(source); }
 private:
     void* do_allocate(std::size_t bytes, std::size_t alignment) override {
-        if (m_failing) { throw std::bad_alloc{}; } return std::pmr::new_delete_resource()->allocate(bytes, alignment);
+        if (m_failing) { throw std::bad_alloc{}; }
+        if (m_stopOnAllocation) { m_stopOnAllocation->request_stop(); m_stopOnAllocation.reset(); }
+        return std::pmr::new_delete_resource()->allocate(bytes, alignment);
     }
     void do_deallocate(void* memory, std::size_t bytes, std::size_t alignment) override { std::pmr::new_delete_resource()->deallocate(memory, bytes, alignment); }
     bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override { return this == &other; }
     bool m_failing{};
+    std::optional<std::stop_source> m_stopOnAllocation{};
 };
 }
 
@@ -239,4 +243,26 @@ TEST_CASE("Snapshots own external obstacle values and dropped prediction leases 
     CHECK(snapshot.GetObstacles()[0].GetStart() == Vec3{4, 0, 0});
     { const auto dropped{CrowdPrediction(crowd, snapshot)}; CHECK(dropped.size() == 1u); }
     CHECK(CrowdPrediction(crowd, snapshot).size() == 1u); CHECK(agent.GetIndex().GetValue() == 0u);
+}
+TEST_CASE("Cancellation during corridor staging preserves the prior route, snapshot and issued predictions") {
+    const auto mesh{CrowdMesh(true)}; const auto resource{std::make_shared<CrowdFailResource>()};
+    auto created{Crowd::CreateWithResource(mesh, resource)}; REQUIRE(created.has_value()); const auto crowd{*created};
+    auto query{CrowdQuery()}; const auto agent{CrowdAgent(crowd, mesh, {1, 0, 5})};
+    auto initial{crowd->RequestPath(agent, CrowdLocation(mesh, {1, 0}), {19, 0, 5}, *query)};
+    REQUIRE(initial.has_value()); REQUIRE(initial->GetPolygonCount() == 2u);
+    const auto before{CrowdView(crowd)}; const auto issued{CrowdPrediction(crowd, before)}; REQUIRE(issued.size() == 1u);
+
+    // Only the Crowd PMR resource is armed. The independent query workspace
+    // finishes its search before this callback requests cancellation in staging.
+    std::stop_source cancellation{}; resource->StopOnNextAllocation(cancellation);
+    auto cancelled{crowd->RequestPath(agent, CrowdLocation(mesh, {2, 0}), {29, 0, 5}, *query, cancellation.get_token())};
+    REQUIRE(cancellation.stop_requested()); REQUIRE_FALSE(cancelled.has_value()); CHECK(cancelled.error() == CrowdError::Cancelled);
+    const auto after{CrowdView(crowd)}; REQUIRE(after.GetAgents().size() == 1u);
+    REQUIRE(after.GetAgents()[0].GetCorridor().size() == 2u);
+    CHECK(after.GetAgents()[0].GetCorridor().back().GetTileKey() == TileKey{1, 0});
+    CHECK(after.GetAgents()[0].GetCorridorCursor() == 0u);
+    const auto sameSnapshot{crowd->PredictSteering(before, CrowdSeconds{0.1})}; REQUIRE(sameSnapshot.has_value());
+    const auto committed{crowd->CommitResolvedMotion(issued[0], ResolvedMotion{{19, 0, 5}, {}, CrowdLocation(mesh, {1, 0})})};
+    REQUIRE(committed.has_value()); CHECK(committed->GetOutcome() == CommitOutcome::GoalReached);
+    CHECK(committed->GetCorridorCursor() == 1u);
 }

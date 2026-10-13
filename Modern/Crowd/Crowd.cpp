@@ -305,6 +305,7 @@ std::expected<RouteAdmission, CrowdError> Crowd::RequestPath(const AgentLease& a
         std::pmr::vector<PolygonLocation> corridor{route->GetPolygons().begin(), route->GetPolygons().end(), &m_state->memory};
         std::pmr::vector<MeshTransition> transitions{route->GetTransitions().begin(), route->GetTransitions().end(), &m_state->memory};
         const Vec3 steeringTarget{route->GetStatus() == PathStatus::Complete ? target : Centre(corridor.back())};
+        if (cancellation.stop_requested()) { return std::unexpected{CrowdError::Cancelled}; }
         data.corridor.swap(corridor); data.transitions.swap(transitions); data.cursor = 0u;
         data.target = steeringTarget; data.routeStatus = route->GetStatus(); data.cancelled = false;
         data.stalled = CrowdSeconds::zero(); data.pending.clear(); data.stamp.reset(); m_state->stamp.reset();
