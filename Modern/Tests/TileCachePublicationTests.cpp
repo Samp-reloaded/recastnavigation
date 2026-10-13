@@ -17,8 +17,10 @@ public:
     explicit TestResource(std::shared_ptr<ResourceStats> stats = std::make_shared<ResourceStats>()) : m_stats{std::move(stats)} {}
     void FailNextAllocation() noexcept { m_failNext = true; }
     [[nodiscard]] std::size_t GetOutstandingBytes() const noexcept { return m_stats->outstanding; }
+    [[nodiscard]] std::size_t GetAllocationCount() const noexcept { return m_allocations; }
 private:
     void* do_allocate(std::size_t bytes, std::size_t alignment) override {
+        ++m_allocations;
         if (std::exchange(m_failNext, false)) { throw std::bad_alloc{}; }
         void* memory{std::pmr::new_delete_resource()->allocate(bytes, alignment)};
         m_stats->outstanding += bytes; return memory;
@@ -29,6 +31,7 @@ private:
     bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override { return this == &other; }
     std::shared_ptr<ResourceStats> m_stats;
     bool m_failNext{};
+    std::size_t m_allocations{};
 };
 [[nodiscard]] TileUpdate MakeTile(std::int64_t x, std::uint32_t area = 63u, bool layer = false, float height = 0.0f, float ceiling = 2.0f) {
     const float minimum{static_cast<float>(x) * 4.0f};
@@ -155,4 +158,44 @@ TEST_CASE("Cache document ingestion uses the existing versioned tile and layer c
     auto decoded{DecodeTileUpdate(*tile, std::span<const std::byte>{*layer})}; REQUIRE(decoded.has_value());
     CHECK(decoded->GetTile() == source.GetTile()); REQUIRE(decoded->GetLayer().has_value()); CHECK(*decoded->GetLayer() == *source.GetLayer());
     (*tile)[0] = std::byte{0}; auto invalid{DecodeTileUpdate(*tile)}; REQUIRE_FALSE(invalid.has_value()); CHECK(invalid.error().GetError() == CacheError::InvalidDocument);
+}
+TEST_CASE("Invalid nested mesh limits reject admission before any resource allocation") {
+    auto resource{std::make_shared<TestResource>()}; const std::array initial{MakeTile(0), MakeTile(1)};
+    const std::array invalidMesh{MeshLimits{0u}, MeshLimits{65'536u, 0u},
+        MeshLimits{65'536u, 1'048'576u, 8'388'608u, 33'554'432u, 0u}};
+    resource->FailNextAllocation();
+    for (const auto mesh : invalidMesh) {
+        const CacheLimits limits{65'536u, 65'536u, 64u, 4096u, 4u * 1024u * 1024u, 512u * 1024u * 1024u, {}, mesh};
+        auto snapshot{PublicationSnapshot::Create(initial, {}, resource, limits)};
+        REQUIRE_FALSE(snapshot.has_value()); CHECK(snapshot.error().GetError() == CacheError::InvalidLimits);
+        REQUIRE(snapshot.error().GetMeshFailure().has_value()); CHECK(*snapshot.error().GetMeshFailure() == MeshError::InvalidLimits);
+        auto cache{TileCache::Create(initial, resource, limits)};
+        REQUIRE_FALSE(cache.has_value()); CHECK(cache.error().GetError() == CacheError::InvalidLimits);
+        CHECK(resource->GetAllocationCount() == 0u); CHECK(resource->GetOutstandingBytes() == 0u);
+    }
+}
+TEST_CASE("Invalid document limits retain their category and reject storage and decode before processing") {
+    auto resource{std::make_shared<TestResource>()}; const std::array initial{MakeTile(0)};
+    const std::array invalidDocuments{DocumentLimits{31u}, DocumentLimits{256u * 1024u * 1024u, 1'048'576u, 1'048'576u, 2u}};
+    resource->FailNextAllocation();
+    for (const auto documents : invalidDocuments) {
+        const CacheLimits limits{65'536u, 65'536u, 64u, 4096u, 4u * 1024u * 1024u, 512u * 1024u * 1024u, documents};
+        auto cache{TileCache::Create(initial, resource, limits)}; REQUIRE_FALSE(cache.has_value());
+        CHECK(cache.error().GetError() == CacheError::InvalidLimits);
+        REQUIRE(cache.error().GetDocumentFailure().has_value()); CHECK(cache.error().GetDocumentFailure()->GetError() == Error::InvalidLimits);
+        auto decoded{DecodeTileUpdate({}, {}, documents)}; REQUIRE_FALSE(decoded.has_value());
+        CHECK(decoded.error().GetError() == CacheError::InvalidLimits);
+        REQUIRE(decoded.error().GetDocumentFailure().has_value()); CHECK(decoded.error().GetDocumentFailure()->GetError() == Error::InvalidLimits);
+        CHECK(resource->GetAllocationCount() == 0u); CHECK(resource->GetOutstandingBytes() == 0u);
+    }
+}
+TEST_CASE("Valid zero arc budgets remain capacity failures and malformed documents remain invalid documents") {
+    auto resource{std::make_shared<TestResource>()}; const std::array initial{MakeTile(0), MakeTile(1)};
+    const CacheLimits limits{65'536u, 65'536u, 64u, 4096u, 4u * 1024u * 1024u, 512u * 1024u * 1024u,
+        {}, MeshLimits{65'536u, 1'048'576u, 0u}};
+    auto cache{TileCache::Create(initial, resource, limits)}; REQUIRE_FALSE(cache.has_value());
+    CHECK(cache.error().GetError() == CacheError::CapacityExceeded);
+    REQUIRE(cache.error().GetMeshFailure().has_value()); CHECK(*cache.error().GetMeshFailure() == MeshError::CapacityExceeded);
+    CHECK(resource->GetAllocationCount() > 0u); CHECK(resource->GetOutstandingBytes() == 0u);
+    auto malformed{DecodeTileUpdate({})}; REQUIRE_FALSE(malformed.has_value()); CHECK(malformed.error().GetError() == CacheError::InvalidDocument);
 }

@@ -7,11 +7,22 @@ import recastnav.codec.layer;
 
 namespace recastnav::tilecache {
 namespace {
-[[nodiscard]] bool LimitsValid(const CacheLimits& limits) noexcept {
-    return limits.GetDocumentLimits().IsValid() && limits.GetMaximumTiles() > 0u
-        && limits.GetMaximumObstacles() > 0u && limits.GetMaximumOutstandingBatches() > 0u
-        && limits.GetMaximumAffectedTilesPerBatch() > 0u && limits.GetMaximumQueueBytes() >= sizeof(BatchRequest)
-        && limits.GetMaximumSnapshotDocumentBytes() > 0u;
+[[nodiscard]] std::expected<void, CacheFailure> ValidateLimits(const CacheLimits& limits) noexcept {
+    if (!limits.GetDocumentLimits().IsValid()) {
+        return std::unexpected{CacheFailure{CacheError::InvalidLimits, {}, Failure{Error::InvalidLimits}}};
+    }
+    if (limits.GetMaximumTiles() == 0u || limits.GetMaximumObstacles() == 0u
+        || limits.GetMaximumOutstandingBatches() == 0u || limits.GetMaximumAffectedTilesPerBatch() == 0u
+        || limits.GetMaximumQueueBytes() < sizeof(BatchRequest) || limits.GetMaximumSnapshotDocumentBytes() == 0u) {
+        return std::unexpected{CacheFailure{CacheError::InvalidLimits}};
+    }
+    // Match MeshSnapshot's validity contract. Zero arcs/work remain valid capacity
+    // budgets; tiles, polygons and document bytes are its required nonzero limits.
+    const auto& mesh{limits.GetMeshLimits()};
+    if (mesh.GetMaximumTiles() == 0u || mesh.GetMaximumPolygons() == 0u || mesh.GetMaximumDocumentBytes() == 0u) {
+        return std::unexpected{CacheFailure{CacheError::InvalidLimits, {}, {}, MeshError::InvalidLimits}};
+    }
+    return {};
 }
 [[nodiscard]] bool BoundsValid(const Aabb& bounds) noexcept {
     return bounds.IsValid() && bounds.GetMinimum().GetX() < bounds.GetMaximum().GetX()
@@ -38,12 +49,14 @@ namespace {
     return first.GetKey() == second.GetKey() && first.GetBounds() == second.GetBounds() && first.GetProfile() == second.GetProfile();
 }
 [[nodiscard]] CacheFailure MeshFailure(MeshError error) noexcept {
-    const auto kind{error == MeshError::AllocationFailure ? CacheError::AllocationFailure
+    const auto kind{error == MeshError::InvalidLimits ? CacheError::InvalidLimits
+        : error == MeshError::AllocationFailure ? CacheError::AllocationFailure
         : error == MeshError::CapacityExceeded ? CacheError::CapacityExceeded : CacheError::InvalidDocument};
     return {kind, {}, {}, error};
 }
 [[nodiscard]] CacheFailure DocumentFailure(Failure failure, std::optional<TileKey> key = {}) noexcept {
-    const auto kind{failure.GetError() == Error::AllocationFailure ? CacheError::AllocationFailure
+    const auto kind{failure.GetError() == Error::InvalidLimits ? CacheError::InvalidLimits
+        : failure.GetError() == Error::AllocationFailure ? CacheError::AllocationFailure
         : failure.GetError() == Error::BudgetExceeded || failure.GetError() == Error::SizeOverflow
             ? CacheError::CapacityExceeded : CacheError::InvalidDocument};
     return {kind, key, failure};
@@ -52,6 +65,7 @@ namespace {
 
 std::expected<TileUpdate, CacheFailure> DecodeTileUpdate(std::span<const std::byte> tile,
     std::optional<std::span<const std::byte>> layer, DocumentLimits limits) noexcept {
+    if (!limits.IsValid()) { return std::unexpected{DocumentFailure(Failure{Error::InvalidLimits})}; }
     auto decoded{codec::DecodeTile(tile, limits)};
     if (!decoded) { return std::unexpected{DocumentFailure(decoded.error())}; }
     if (!layer) { return TileUpdate{std::move(*decoded)}; }
@@ -65,7 +79,7 @@ std::expected<PublicationLease, CacheFailure> PublicationSnapshot::Create(std::s
     std::span<const Obstacle> appliedObstacles, std::shared_ptr<std::pmr::memory_resource> resource,
     CacheLimits limits, std::stop_token cancellation) noexcept {
     if (!resource) { return std::unexpected{CacheFailure{CacheError::MissingResource}}; }
-    if (!LimitsValid(limits)) { return std::unexpected{CacheFailure{CacheError::InvalidLimits}}; }
+    if (const auto valid{ValidateLimits(limits)}; !valid) { return std::unexpected{valid.error()}; }
     if (tiles.size() > limits.GetMaximumTiles() || appliedObstacles.size() > limits.GetMaximumObstacles()) {
         return std::unexpected{CacheFailure{CacheError::CapacityExceeded}};
     }

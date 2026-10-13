@@ -62,6 +62,9 @@ bound runtime document and graph construction. Queue byte accounting excludes
 allocator/control-block overhead and reserved container slack. Old snapshots,
 requests and candidates explicitly retained by callers consume caller-owned
 memory; admission limits are not a global process memory quota.
+Invalid nested document or mesh limits are rejected before encoding or scratch
+allocation as `InvalidLimits`, retaining the nested typed failure. Mesh arc/work
+budgets may be zero; exceeding these valid budgets remains `CapacityExceeded`.
 
 ## Integration and current boundary
 
@@ -86,3 +89,5 @@ Validation for this isolated checkpoint: native configure/build/test/install
 snapshot/locator authority, stale batch rebasing, cancellation, allocation
 rollback, bounded admission, duplicates/missing/metadata rejection, removal,
 PMR lifetime and versioned codec ingestion.
+Additional regressions cover invalid nested limits with zero resource allocation
+attempts and preservation of capacity/invalid-document error categories.
