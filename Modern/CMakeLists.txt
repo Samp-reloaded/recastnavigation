@@ -56,6 +56,15 @@ recastnav_component(DetourQuery Query
     IMPLEMENTATIONS Detour/Query.cpp
     DEPENDENCIES DetourMesh RecastCore)
 
+recastnav_component(DetourTileCache TileCache
+    INTERFACES TileCache/TileCache.ixx
+    IMPLEMENTATIONS TileCache/TileCache.cpp
+    DEPENDENCIES DetourMesh RecastCodec RecastCore)
+recastnav_component(DetourCrowd Crowd
+    INTERFACES Crowd/Crowd.ixx
+    IMPLEMENTATIONS Crowd/Crowd.cpp
+    DEPENDENCIES DetourQuery DetourMesh RecastCore)
+
 set(recastnav_kernel_root "${CMAKE_CURRENT_SOURCE_DIR}/../Recast")
 add_library(recastnav_cooker_kernel STATIC
     "${recastnav_kernel_root}/Source/Recast.cpp"
@@ -88,7 +97,8 @@ target_link_libraries(RecastBuild PRIVATE "$<LINK_ONLY:recastnav_cooker_kernel>"
 
 if(COMMAND gtasa_apply_target_module_imports)
     foreach(producer IN ITEMS RecastCore_api RecastCore_impl RecastCodec_api RecastCodec_impl
-            DetourMesh_api DetourMesh_impl DetourQuery_api DetourQuery_impl RecastBuild_api RecastBuild_impl)
+            DetourMesh_api DetourMesh_impl DetourQuery_api DetourQuery_impl RecastBuild_api RecastBuild_impl
+            DetourTileCache_api DetourTileCache_impl DetourCrowd_api DetourCrowd_impl)
         gtasa_apply_target_module_imports(${producer})
     endforeach()
 endif()
