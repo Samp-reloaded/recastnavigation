@@ -25,7 +25,7 @@ export import recastnav.document;
 export namespace recastnav {
 enum class MeshError {
     InvalidLimits, MissingTileLease, DuplicateTile, IncompatibleProfile,
-    CapacityExceeded, AllocationFailure, InvalidPolygon, SnapshotMismatch,
+    CapacityExceeded, AllocationFailure, InvalidPolygon, SnapshotMismatch, InvalidNode, InvalidArc,
 };
 class MeshLimits final {
 public:
@@ -61,7 +61,6 @@ public:
     [[nodiscard]] bool operator==(const PolygonLocation&) const noexcept = default;
 private:
     friend class MeshSnapshot;
-    friend class QueryWorkspace;
     PolygonLocation(SnapshotLease snapshot, std::size_t tile, PolygonIndex polygon) noexcept
         : m_snapshot{std::move(snapshot)}, m_tile{tile}, m_polygon{polygon} {}
     SnapshotLease m_snapshot;
@@ -80,7 +79,58 @@ private:
     Vec3 m_departure{}, m_arrival{};
     std::optional<std::uint64_t> m_offMeshId{};
 };
-class QueryWorkspace;
+struct MeshNodeIndexTag;
+struct MeshArcIndexTag;
+using MeshNodeIndex = Index<MeshNodeIndexTag>;
+using MeshArcIndex = Index<MeshArcIndexTag>;
+class MeshGraphReadView;
+class MeshGraphNode;
+// Read proxies retain their exact snapshot lease. Indices are local diagnostics;
+// obtaining a node, arc or polygon location always goes through a checked factory.
+class MeshGraphArc final {
+public:
+    MeshGraphArc(const MeshGraphArc&) noexcept = default;
+    MeshGraphArc& operator=(const MeshGraphArc&) noexcept = default;
+    [[nodiscard]] MeshNodeIndex GetDestination() const noexcept;
+    [[nodiscard]] const MeshTransition& GetTransition() const noexcept;
+    [[nodiscard]] std::optional<std::reference_wrapper<const OffMeshConnection>> GetOffMeshConnection() const noexcept;
+private:
+    friend class MeshGraphNode;
+    MeshGraphArc(SnapshotLease snapshot, std::size_t node, std::size_t arc) noexcept
+        : m_snapshot{std::move(snapshot)}, m_node{node}, m_arc{arc} {}
+    SnapshotLease m_snapshot;
+    std::size_t m_node{}, m_arc{};
+};
+class MeshGraphNode final {
+public:
+    MeshGraphNode(const MeshGraphNode&) noexcept = default;
+    MeshGraphNode& operator=(const MeshGraphNode&) noexcept = default;
+    [[nodiscard]] const TileDocument& GetTile() const noexcept;
+    [[nodiscard]] PolygonIndex GetPolygonIndex() const noexcept;
+    [[nodiscard]] const Vec3& GetCentre() const noexcept;
+    [[nodiscard]] const Aabb& GetBounds() const noexcept;
+    [[nodiscard]] std::size_t GetArcCount() const noexcept;
+    [[nodiscard]] std::expected<MeshGraphArc, MeshError> GetArc(MeshArcIndex arc) const noexcept;
+private:
+    friend class MeshGraphReadView;
+    MeshGraphNode(SnapshotLease snapshot, std::size_t node) noexcept : m_snapshot{std::move(snapshot)}, m_node{node} {}
+    SnapshotLease m_snapshot;
+    std::size_t m_node{};
+};
+class MeshGraphReadView final {
+public:
+    MeshGraphReadView(const MeshGraphReadView&) noexcept = default;
+    MeshGraphReadView& operator=(const MeshGraphReadView&) noexcept = default;
+    [[nodiscard]] const SnapshotLease& GetSnapshot() const noexcept { return m_snapshot; }
+    [[nodiscard]] std::size_t GetNodeCount() const noexcept;
+    [[nodiscard]] std::expected<MeshGraphNode, MeshError> GetNode(MeshNodeIndex node) const noexcept;
+    [[nodiscard]] std::expected<MeshNodeIndex, MeshError> GetNodeIndex(const PolygonLocation& location) const noexcept;
+    [[nodiscard]] std::expected<PolygonLocation, MeshError> LocateNode(MeshNodeIndex node) const noexcept;
+private:
+    friend class MeshSnapshot;
+    explicit MeshGraphReadView(SnapshotLease snapshot) noexcept : m_snapshot{std::move(snapshot)} {}
+    SnapshotLease m_snapshot;
+};
 class MeshSnapshot final : public std::enable_shared_from_this<MeshSnapshot> {
     class ConstructionKey final {
         friend class MeshSnapshot;
@@ -95,6 +145,7 @@ public:
     [[nodiscard]] std::span<const TileLease> GetTiles() const noexcept { return m_tiles; }
     [[nodiscard]] std::size_t GetPolygonCount() const noexcept { return m_nodes.size(); }
     [[nodiscard]] std::size_t GetArcCount() const noexcept { return m_arcCount; }
+    [[nodiscard]] MeshGraphReadView ReadGraph() const noexcept { return MeshGraphReadView{shared_from_this()}; }
     [[nodiscard]] std::expected<std::optional<PolygonLocation>, MeshError> Locate(
         const TileKey& tile, PolygonIndex polygon) const noexcept;
     [[nodiscard]] std::expected<std::reference_wrapper<const Polygon>, MeshError> GetPolygon(
@@ -103,8 +154,10 @@ public:
     MeshSnapshot& operator=(const MeshSnapshot&) = delete;
     explicit MeshSnapshot(ConstructionKey) noexcept {}
 private:
-    friend class QueryWorkspace;
     friend class PolygonLocation;
+    friend class MeshGraphReadView;
+    friend class MeshGraphNode;
+    friend class MeshGraphArc;
     struct Arc final {
         std::size_t destination{};
         MeshTransition transition{{}, {}};

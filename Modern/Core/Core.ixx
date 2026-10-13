@@ -43,7 +43,8 @@ private:
 };
 template<class Tag> class Index final {
 public:
-    constexpr explicit Index(std::size_t value = 0) noexcept : m_value{value} {}
+    constexpr Index() noexcept = default;
+    constexpr explicit Index(std::size_t value) noexcept : m_value{value} {}
     [[nodiscard]] constexpr std::size_t GetValue() const noexcept { return m_value; }
     [[nodiscard]] constexpr auto operator<=>(const Index&) const noexcept = default;
 private:
@@ -55,6 +56,10 @@ struct DetailVertexIndexTag;
 using VertexIndex = Index<VertexIndexTag>;
 using PolygonIndex = Index<PolygonIndexTag>;
 using DetailVertexIndex = Index<DetailVertexIndexTag>;
+static_assert(VertexIndex{}.GetValue() == 0u);
+static_assert(std::array<DetailVertexIndex, 3>{}[0].GetValue() == 0u);
+static_assert(!std::is_convertible_v<std::size_t, VertexIndex>);
+static_assert(!std::is_convertible_v<VertexIndex, PolygonIndex>);
 
 class DocumentLimits final {
 public:

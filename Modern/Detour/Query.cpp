@@ -92,14 +92,15 @@ std::expected<std::optional<NearestPolygon>, QueryError> QueryWorkspace::FindNea
     }
     std::optional<NearestPolygon> nearest{};
     double distance{std::numeric_limits<double>::infinity()};
+    const auto graph{snapshot->ReadGraph()};
     if (cancellation.stop_requested()) { return std::unexpected{QueryError::Cancelled}; }
-    for (std::size_t i{}; i < snapshot->m_nodes.size(); ++i) {
+    for (std::size_t i{}; i < graph.GetNodeCount(); ++i) {
         if (cancellation.stop_requested()) { return std::unexpected{QueryError::Cancelled}; }
-        const auto& node{snapshot->m_nodes[i]}; const auto& tile{*snapshot->m_tiles[node.tile]};
-        if (!filter.Accepts(tile.GetPolygons()[node.polygon.GetValue()]) || !IntersectsSearch(node.bounds, position, halfExtents)) { continue; }
-        const auto point{ClosestSurface(tile, node.polygon, position)};
+        const auto node{*graph.GetNode(MeshNodeIndex{i})}; const auto& tile{node.GetTile()};
+        if (!filter.Accepts(tile.GetPolygons()[node.GetPolygonIndex().GetValue()]) || !IntersectsSearch(node.GetBounds(), position, halfExtents)) { continue; }
+        const auto point{ClosestSurface(tile, node.GetPolygonIndex(), position)};
         const double candidate{DistanceSquared(point, position)};
-        if (candidate < distance) { nearest = NearestPolygon{snapshot->Location(i), point, candidate}; distance = candidate; }
+        if (candidate < distance) { nearest = NearestPolygon{*graph.LocateNode(MeshNodeIndex{i}), point, candidate}; distance = candidate; }
     }
     return nearest;
 }
@@ -146,8 +147,8 @@ std::expected<CorridorResult, QueryError> QueryWorkspace::FindPath(const Polygon
     const PolygonLocation& goal, const QueryFilter& filter, SearchAlgorithm algorithm, std::stop_token cancellation) noexcept {
     if (m_inUse.test_and_set(std::memory_order_acquire)) { return std::unexpected{QueryError::WorkspaceBusy}; }
     const WorkspaceGuard guard{m_inUse};
-    if (!start.m_snapshot || !goal.m_snapshot) { return std::unexpected{QueryError::MissingSnapshotLease}; }
-    if (start.m_snapshot != goal.m_snapshot) { return std::unexpected{QueryError::SnapshotMismatch}; }
+    if (!start.GetSnapshot() || !goal.GetSnapshot()) { return std::unexpected{QueryError::MissingSnapshotLease}; }
+    if (start.GetSnapshot() != goal.GetSnapshot()) { return std::unexpected{QueryError::SnapshotMismatch}; }
     if (algorithm != SearchAlgorithm::AStar && algorithm != SearchAlgorithm::Dijkstra) { return std::unexpected{QueryError::InvalidFilter}; }
     try {
         return Search(start, goal, filter, algorithm, cancellation);
@@ -156,14 +157,17 @@ std::expected<CorridorResult, QueryError> QueryWorkspace::FindPath(const Polygon
 }
 std::expected<CorridorResult, QueryError> QueryWorkspace::Search(const PolygonLocation& start,
     const PolygonLocation& goal, const QueryFilter& filter, SearchAlgorithm algorithm, std::stop_token cancellation) {
-    const auto& snapshot{*start.m_snapshot};
-    const std::size_t source{snapshot.NodeIndex(start)}, destination{snapshot.NodeIndex(goal)};
+    const auto graph{start.GetSnapshot()->ReadGraph()};
+    const auto sourceIndex{graph.GetNodeIndex(start)}, destinationIndex{graph.GetNodeIndex(goal)};
+    if (!sourceIndex || !destinationIndex) { return std::unexpected{QueryError::SnapshotMismatch}; }
+    const std::size_t source{sourceIndex->GetValue()}, destination{destinationIndex->GetValue()};
     const auto polygon = [&](std::size_t node) -> const Polygon& {
-        const auto& entry{snapshot.m_nodes[node]}; return snapshot.m_tiles[entry.tile]->GetPolygons()[entry.polygon.GetValue()];
+        const auto entry{*graph.GetNode(MeshNodeIndex{node})}; return entry.GetTile().GetPolygons()[entry.GetPolygonIndex().GetValue()];
     };
     if (!filter.Accepts(polygon(source)) || !filter.Accepts(polygon(destination))) { return std::unexpected{QueryError::FilteredEndpoint}; }
     m_nodes.clear(); m_heap.clear(); m_lookup.clear(); m_reverse.clear();
-    const auto remainingDistance = [&](std::size_t node) { return Distance(snapshot.m_nodes[node].centre, snapshot.m_nodes[destination].centre); };
+    const auto goalNode{*graph.GetNode(MeshNodeIndex{destination})};
+    const auto remainingDistance = [&](std::size_t node) { return Distance(graph.GetNode(MeshNodeIndex{node})->GetCentre(), goalNode.GetCentre()); };
     const double minimumCost{filter.GetMinimumCost()};
     const auto heuristic = [&](std::size_t node) { return algorithm == SearchAlgorithm::AStar ? remainingDistance(node) * minimumCost : 0.0; };
     const double sourceHeuristic{heuristic(source)};
@@ -182,32 +186,34 @@ std::expected<CorridorResult, QueryError> QueryWorkspace::Search(const PolygonLo
         const std::size_t current{m_nodes[currentIndex].polygon};
         if (current == destination) { best = currentIndex; termination = PathTermination::ReachedGoal; break; }
         const auto& currentPolygon{polygon(current)};
-        const auto& graphNode{snapshot.m_nodes[current]};
-        for (std::size_t arcIndex{}; arcIndex < graphNode.arcs.size(); ++arcIndex) {
+        const auto graphNode{*graph.GetNode(MeshNodeIndex{current})};
+        for (std::size_t arcIndex{}; arcIndex < graphNode.GetArcCount(); ++arcIndex) {
             if (cancellation.stop_requested()) { termination = PathTermination::Cancelled; break; }
-            const auto& arc{graphNode.arcs[arcIndex]}; const auto& nextPolygon{polygon(arc.destination)};
+            const auto arc{*graphNode.GetArc(MeshArcIndex{arcIndex})};
+            const std::size_t nextPolygonIndex{arc.GetDestination().GetValue()};
+            const auto& nextPolygon{polygon(nextPolygonIndex)};
             if (!filter.Accepts(nextPolygon)) { continue; }
             double segmentCost{filter.GetAreaCost(currentPolygon.GetArea())};
-            if (arc.offMesh) {
-                const auto& connection{snapshot.m_tiles[arc.offMesh->first]->GetOffMeshConnections()[arc.offMesh->second]};
+            if (const auto offMesh{arc.GetOffMeshConnection()}) {
+                const auto& connection{offMesh->get()};
                 if (!filter.Accepts(connection)) { continue; }
                 segmentCost = filter.GetAreaCost(connection.GetArea());
             }
-            const auto& departure{arc.transition.GetDeparture()}; const auto& arrival{arc.transition.GetArrival()};
-            const double step{Distance(graphNode.centre, departure) * filter.GetAreaCost(currentPolygon.GetArea())
+            const auto& departure{arc.GetTransition().GetDeparture()}; const auto& arrival{arc.GetTransition().GetArrival()};
+            const double step{Distance(graphNode.GetCentre(), departure) * filter.GetAreaCost(currentPolygon.GetArea())
                 + Distance(departure, arrival) * segmentCost
-                + Distance(arrival, snapshot.m_nodes[arc.destination].centre) * filter.GetAreaCost(nextPolygon.GetArea())};
-            const double cost{m_nodes[currentIndex].cost + step}, estimate{heuristic(arc.destination)};
+                + Distance(arrival, graph.GetNode(MeshNodeIndex{nextPolygonIndex})->GetCentre()) * filter.GetAreaCost(nextPolygon.GetArea())};
+            const double cost{m_nodes[currentIndex].cost + step}, estimate{heuristic(nextPolygonIndex)};
             if (!std::isfinite(cost) || !std::isfinite(estimate) || !std::isfinite(cost + estimate)) {
                 return std::unexpected{QueryError::CostOverflow};
             }
-            const auto found{m_lookup.find(arc.destination)};
+            const auto found{m_lookup.find(nextPolygonIndex)};
             std::size_t nextIndex{};
             if (found == m_lookup.end()) {
                 if (m_nodes.size() == m_limits.GetMaximumNodes()) { capacityReached = true; continue; }
                 nextIndex = m_nodes.size();
-                m_nodes.push_back(SearchNode{arc.destination, cost, estimate, currentIndex, arcIndex, {}});
-                m_lookup.emplace(arc.destination, nextIndex);
+                m_nodes.push_back(SearchNode{nextPolygonIndex, cost, estimate, currentIndex, arcIndex, {}});
+                m_lookup.emplace(nextPolygonIndex, nextIndex);
             } else {
                 nextIndex = found->second;
                 if (cost >= m_nodes[nextIndex].cost) { continue; }
@@ -215,9 +221,9 @@ std::expected<CorridorResult, QueryError> QueryWorkspace::Search(const PolygonLo
                 m_nodes[nextIndex].parentArc = arcIndex;
             }
             PushOrUpdate(nextIndex);
-            const double distance{remainingDistance(arc.destination)};
+            const double distance{remainingDistance(nextPolygonIndex)};
             if (distance < bestDistance || (distance == bestDistance
-                && (cost < m_nodes[best].cost || (cost == m_nodes[best].cost && arc.destination < m_nodes[best].polygon)))) {
+                && (cost < m_nodes[best].cost || (cost == m_nodes[best].cost && nextPolygonIndex < m_nodes[best].polygon)))) {
                 best = nextIndex; bestDistance = distance;
             }
         }
@@ -234,10 +240,11 @@ std::expected<CorridorResult, QueryError> QueryWorkspace::Search(const PolygonLo
     std::vector<PolygonLocation> polygons{}; std::vector<MeshTransition> transitions{};
     polygons.reserve(m_reverse.size()); transitions.reserve(m_reverse.size() - 1u);
     for (std::size_t i{}; i < m_reverse.size(); ++i) {
-        const auto& node{m_nodes[m_reverse[i]]}; polygons.push_back(snapshot.Location(node.polygon));
+        const auto& node{m_nodes[m_reverse[i]]}; polygons.push_back(*graph.LocateNode(MeshNodeIndex{node.polygon}));
         if (i > 0u) {
             const auto& parent{m_nodes[m_reverse[i - 1u]]};
-            transitions.push_back(snapshot.m_nodes[parent.polygon].arcs[*node.parentArc].transition);
+            const auto parentNode{*graph.GetNode(MeshNodeIndex{parent.polygon})};
+            transitions.push_back(parentNode.GetArc(MeshArcIndex{*node.parentArc})->GetTransition());
         }
     }
     const PathStatus status{termination == PathTermination::ReachedGoal ? PathStatus::Complete : PathStatus::Partial};

@@ -16,6 +16,12 @@ polygon is an error. Locations from another snapshot are rejected even when thei
 tile and polygon indices coincide. No location or session value is serialized as
 runtime authority. Locations and completed query results can outlive a workspace.
 
+`ReadGraph` returns a mesh-owned immutable graph view. Its checked `GetNode`,
+`GetArc`, `GetNodeIndex` and `LocateNode` conversions expose read access without
+granting mutation or accepting a foreign snapshot location. Views and node/arc
+proxies each retain the exact snapshot lease. The mesh module declares no query
+implementation class; `QueryWorkspace` belongs solely to `recastnav.query`.
+
 Local edges use the document's validated reciprocal adjacency. Cross-tile edges
 match opposite portals on a shared boundary plane and adjacent tile coordinates;
 their common interval is clipped to the profile's permitted climb. Connections

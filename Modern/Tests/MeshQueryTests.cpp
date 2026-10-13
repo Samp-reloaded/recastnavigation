@@ -20,6 +20,7 @@
 // This altered implementation is part of the Samp-reloaded fork.
 #include <doctest/doctest.h>
 import std;
+import recastnav.mesh;
 import recastnav.query;
 
 namespace {
@@ -287,4 +288,21 @@ TEST_CASE("Portal overlap clips sloped height differences to the traversable cli
     REQUIRE(path.has_value()); CHECK(path->GetStatus() == PathStatus::Complete); REQUIRE(path->GetTransitions().size() == 1u);
     CHECK(path->GetTransitions()[0].GetDeparture().GetZ() == doctest::Approx(0.45));
     CHECK(path->GetTransitions()[0].GetArrival().GetY() == doctest::Approx(0.45));
+}
+TEST_CASE("Mesh-owned graph read views retain authority and reject unchecked node and arc indices") {
+    auto snapshot{Row()}; const auto graph{snapshot->ReadGraph()};
+    const auto original{Location(snapshot, {0, 0})};
+    const auto index{graph.GetNodeIndex(original)}; REQUIRE(index.has_value()); CHECK(index->GetValue() == 0u);
+    const auto node{graph.GetNode(*index)}; REQUIRE(node.has_value()); CHECK(node->GetArcCount() == 1u);
+    const auto arc{node->GetArc(MeshArcIndex{0})}; REQUIRE(arc.has_value()); CHECK(arc->GetDestination().GetValue() == 1u);
+    CHECK_FALSE(arc->GetOffMeshConnection().has_value());
+    const auto invalidNode{graph.GetNode(MeshNodeIndex{graph.GetNodeCount()})};
+    REQUIRE_FALSE(invalidNode.has_value()); CHECK(invalidNode.error() == MeshError::InvalidNode);
+    const auto invalidArc{node->GetArc(MeshArcIndex{node->GetArcCount()})};
+    REQUIRE_FALSE(invalidArc.has_value()); CHECK(invalidArc.error() == MeshError::InvalidArc);
+    CHECK_FALSE(graph.LocateNode(MeshNodeIndex{graph.GetNodeCount()}).has_value());
+    const auto other{Row()}; const auto mismatch{graph.GetNodeIndex(Location(other, {0, 0}))};
+    REQUIRE_FALSE(mismatch.has_value()); CHECK(mismatch.error() == MeshError::SnapshotMismatch);
+    snapshot.reset(); CHECK(node->GetTile().GetMetadata().GetKey() == TileKey{0, 0});
+    const auto restored{graph.LocateNode(*index)}; REQUIRE(restored.has_value()); CHECK(*restored == original);
 }

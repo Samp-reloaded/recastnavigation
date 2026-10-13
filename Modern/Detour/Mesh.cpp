@@ -52,6 +52,35 @@ struct Portal final {
 }
 }
 const TileKey& PolygonLocation::GetTileKey() const noexcept { return m_snapshot->m_tiles[m_tile]->GetMetadata().GetKey(); }
+MeshNodeIndex MeshGraphArc::GetDestination() const noexcept { return MeshNodeIndex{m_snapshot->m_nodes[m_node].arcs[m_arc].destination}; }
+const MeshTransition& MeshGraphArc::GetTransition() const noexcept { return m_snapshot->m_nodes[m_node].arcs[m_arc].transition; }
+std::optional<std::reference_wrapper<const OffMeshConnection>> MeshGraphArc::GetOffMeshConnection() const noexcept {
+    const auto& connection{m_snapshot->m_nodes[m_node].arcs[m_arc].offMesh};
+    if (!connection) { return {}; }
+    return std::cref(m_snapshot->m_tiles[connection->first]->GetOffMeshConnections()[connection->second]);
+}
+const TileDocument& MeshGraphNode::GetTile() const noexcept { return *m_snapshot->m_tiles[m_snapshot->m_nodes[m_node].tile]; }
+PolygonIndex MeshGraphNode::GetPolygonIndex() const noexcept { return m_snapshot->m_nodes[m_node].polygon; }
+const Vec3& MeshGraphNode::GetCentre() const noexcept { return m_snapshot->m_nodes[m_node].centre; }
+const Aabb& MeshGraphNode::GetBounds() const noexcept { return m_snapshot->m_nodes[m_node].bounds; }
+std::size_t MeshGraphNode::GetArcCount() const noexcept { return m_snapshot->m_nodes[m_node].arcs.size(); }
+std::expected<MeshGraphArc, MeshError> MeshGraphNode::GetArc(MeshArcIndex arc) const noexcept {
+    if (arc.GetValue() >= GetArcCount()) { return std::unexpected{MeshError::InvalidArc}; }
+    return MeshGraphArc{m_snapshot, m_node, arc.GetValue()};
+}
+std::size_t MeshGraphReadView::GetNodeCount() const noexcept { return m_snapshot->m_nodes.size(); }
+std::expected<MeshGraphNode, MeshError> MeshGraphReadView::GetNode(MeshNodeIndex node) const noexcept {
+    if (node.GetValue() >= GetNodeCount()) { return std::unexpected{MeshError::InvalidNode}; }
+    return MeshGraphNode{m_snapshot, node.GetValue()};
+}
+std::expected<MeshNodeIndex, MeshError> MeshGraphReadView::GetNodeIndex(const PolygonLocation& location) const noexcept {
+    if (location.GetSnapshot() != m_snapshot) { return std::unexpected{MeshError::SnapshotMismatch}; }
+    return MeshNodeIndex{m_snapshot->NodeIndex(location)};
+}
+std::expected<PolygonLocation, MeshError> MeshGraphReadView::LocateNode(MeshNodeIndex node) const noexcept {
+    if (node.GetValue() >= GetNodeCount()) { return std::unexpected{MeshError::InvalidNode}; }
+    return m_snapshot->Location(node.GetValue());
+}
 std::expected<SnapshotLease, MeshError> MeshSnapshot::Create(std::vector<TileLease> tiles, MeshLimits limits) noexcept {
     if (limits.GetMaximumTiles() == 0u || limits.GetMaximumPolygons() == 0u || limits.GetMaximumDocumentBytes() == 0u) {
         return std::unexpected{MeshError::InvalidLimits};
